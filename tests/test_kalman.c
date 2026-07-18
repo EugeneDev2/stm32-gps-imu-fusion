@@ -234,6 +234,55 @@ static void test_gate_permanent_shift(void) {
     CHECK(fabsf(pE - 50.0f) < 5.0f, "g) position converges to the new location");
 }
 
+/* test h: 60 s outage with residual velocity - filter stops instead of running away */
+static void test_outage_decay(void) {
+    KalmanFilter kf;
+    KF_Init(&kf, SIGMA_A, SIGMA_G);
+    settle_static(&kf, 30);
+    kf.x[2] = 0.3f; /* залишкова швидкість, як від хвоста дрейфу */
+    kf.x[3] = 0.0f;
+
+    float pE0, pN0;
+    KF_GetPosition(&kf, &pE0, &pN0);
+    float pos_55s = 0.0f;
+    for (int i = 0; i < 6000; i++) { /* 60 s, без апдейтів */
+        KF_Predict(&kf, DT, 0.0f, 0.0f);
+        if (i == 5500) KF_GetPosition(&kf, &pos_55s, &pN0);
+    }
+    float pE1, pN1, vE1, vN1;
+    KF_GetPosition(&kf, &pE1, &pN1);
+    KF_GetVelocity(&kf, &vE1, &vN1);
+    float shift = fabsf(pE1 - pE0);
+    float tail_creep = fabsf(pE1 - pos_55s); /* рух за останні 5 с outage */
+    printf("  [h] 60s outage, v0=0.3: shift=%.2f m (no decay would be 18.0), "
+           "v_end=%.4f, last-5s creep=%.3f m\n", shift, vE1, tail_creep);
+    CHECK(shift < 6.0f, "h) position stops during long outage (no runaway)");
+    CHECK(fabsf(vE1) < 0.02f, "h) velocity decayed to ~zero");
+    CHECK(tail_creep < 0.1f, "h) position stationary by end of outage");
+}
+
+/* test i: 3 s gap - velocity untouched, behaviour as with continuous fixes */
+static void test_short_gap(void) {
+    KalmanFilter kf;
+    KF_Init(&kf, SIGMA_A, SIGMA_G);
+    settle_static(&kf, 30);
+    kf.x[2] = 0.3f;
+
+    float vE_before, vN_before, vE_after, vN_after;
+    KF_GetVelocity(&kf, &vE_before, &vN_before);
+    for (int i = 0; i < 300; i++) { /* 3 s без апдейтів */
+        KF_Predict(&kf, DT, 0.0f, 0.0f);
+    }
+    KF_GetVelocity(&kf, &vE_after, &vN_after);
+    printf("  [i] 3s gap: v before=%.4f after=%.4f\n", vE_before, vE_after);
+    CHECK(fabsf(vE_after - vE_before) < 1e-6f && fabsf(vN_after - vN_before) < 1e-6f,
+          "i) short gap (<=5s) leaves velocity untouched");
+
+    /* і перший fix після паузи приймається */
+    CHECK(KF_UpdateGated(&kf, 0.9f, 0.1f, 4.0f, 0.0f) == 1,
+          "i) first fix after short gap accepted");
+}
+
 int main(void) {
     test_synthetic_motion();
     test_convergence();
@@ -242,6 +291,8 @@ int main(void) {
     test_gate_teleport();
     test_gate_maneuver();
     test_gate_permanent_shift();
+    test_outage_decay();
+    test_short_gap();
     printf(fails ? "\n%d TEST(S) FAILED\n" : "\nALL TESTS PASSED\n", fails);
     return fails ? 1 : 0;
 }

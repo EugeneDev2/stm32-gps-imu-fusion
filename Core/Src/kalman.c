@@ -1,5 +1,6 @@
 /* kalman.c - 4-state linear KF, hand-unrolled matrix math (no loops, no HAL) */
 #include "kalman.h"
+#include <math.h>
 
 void KF_Init(KalmanFilter *kf, float sigma_accel, float sigma_gps) {
     kf->sa2 = sigma_accel * sigma_accel;
@@ -11,6 +12,7 @@ void KF_Init(KalmanFilter *kf, float sigma_accel, float sigma_gps) {
     kf->prev_zN = 0.0f;
     kf->have_prev_z = 0;
     kf->consecutive_rejects = 0;
+    kf->time_since_update = 0.0f;
 
     /* стартова невизначеність: позиція ~ GPS, швидкість невідома (5 м/с)^2 */
     kf->P[0][0] = kf->sg2; kf->P[0][1] = 0.0f;    kf->P[0][2] = 0.0f;  kf->P[0][3] = 0.0f;
@@ -21,6 +23,16 @@ void KF_Init(KalmanFilter *kf, float sigma_accel, float sigma_gps) {
 
 void KF_Predict(KalmanFilter *kf, float dt, float aE, float aN) {
     const float dt2 = dt * dt;
+
+    /* GPS-outage: без прийнятого апдейту довше KF_OUTAGE_START_S модель
+       постійної швидкості тікає по прямій - гасимо швидкість експоненційно,
+       щоб фільтр плавно зупинявся. Короткі паузи (<5 с) не зачіпаються */
+    kf->time_since_update += dt;
+    if (kf->time_since_update > KF_OUTAGE_START_S) {
+        const float decay = expf(-dt / KF_VEL_DECAY_TAU_S);
+        kf->x[2] *= decay;
+        kf->x[3] *= decay;
+    }
 
     /* x = F*x + B*a */
     kf->x[0] += dt * kf->x[2] + 0.5f * dt2 * aE;
@@ -130,6 +142,7 @@ void KF_Update(KalmanFilter *kf, float zE, float zN) {
         return; /* виродження - пропускаємо апдейт, фільтр лишається живим */
     }
     kf_apply_update(kf, y0, y1, i00, i01, i11);
+    kf->time_since_update = 0.0f;
 }
 
 int KF_UpdateGated(KalmanFilter *kf, float zE, float zN, float dt_fix, float doppler_mps) {
@@ -180,11 +193,13 @@ int KF_UpdateGated(KalmanFilter *kf, float zE, float zN, float dt_fix, float dop
             kf->P[2][0] = 0.0f;    kf->P[2][1] = 0.0f;    kf->P[2][2] = 25.0f; kf->P[2][3] = 0.0f;
             kf->P[3][0] = 0.0f;    kf->P[3][1] = 0.0f;    kf->P[3][2] = 0.0f;  kf->P[3][3] = 25.0f;
             kf->consecutive_rejects = 0;
+            kf->time_since_update = 0.0f;
             reject = 0;
         }
     } else {
         kf_apply_update(kf, y0, y1, i00, i01, i11);
         kf->consecutive_rejects = 0;
+        kf->time_since_update = 0.0f;
     }
 
     kf->prev_zE = zE;

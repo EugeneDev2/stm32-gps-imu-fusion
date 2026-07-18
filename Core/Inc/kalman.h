@@ -11,6 +11,11 @@
 #define KF_GATE_JUMP_M      10.0f
 #define KF_GATE_DOPPLER_K   5.0f
 
+/* velocity decay during GPS outage: starts after this many seconds without
+ * an accepted update, exponential with this time constant */
+#define KF_OUTAGE_START_S   5.0f
+#define KF_VEL_DECAY_TAU_S  10.0f
+
 typedef struct {
     float x[4];      /* pE, pN, vE, vN */
     float P[4][4];   /* covariance */
@@ -21,6 +26,9 @@ typedef struct {
     float prev_zE, prev_zN;            /* попереднє вимірювання (для Doppler-чеку) */
     unsigned char have_prev_z;
     unsigned char consecutive_rejects;
+
+    /* outage state: час від останнього ПРИЙНЯТОГО апдейту */
+    float time_since_update;
 } KalmanFilter;
 
 void KF_Init(KalmanFilter *kf, float sigma_accel, float sigma_gps);
