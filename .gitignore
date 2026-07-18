@@ -1,0 +1,17 @@
+# CMake / CubeMX build artifacts
+build/
+mx.scratch
+
+Drivers/
+# Keil build output & per-user GUI state
+MDK-ARM/
+*.uvguix.*
+
+# serial logs
+logs/
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+!.settings
