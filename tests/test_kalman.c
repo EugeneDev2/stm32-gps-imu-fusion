@@ -154,11 +154,94 @@ static void test_static_bias(void) {
     CHECK(max_dist < 3.0f * SIGMA_G, "d) static position within 3 sigma despite accel bias");
 }
 
+/* helper: converge filter on static truth with clean GPS via gated updates */
+static void settle_static(KalmanFilter *kf, int seconds) {
+    for (int i = 0; i < seconds * 100; i++) {
+        KF_Predict(kf, DT, 0.0f, 0.0f);
+        if ((i + 1) % GPS_EVERY == 0) {
+            KF_UpdateGated(kf, (float)(0.3 * gauss()), (float)(0.3 * gauss()), 1.0f, 0.0f);
+        }
+    }
+}
+
+/* test e: single 100 m teleport is rejected, filter does not twitch */
+static void test_gate_teleport(void) {
+    KalmanFilter kf;
+    KF_Init(&kf, SIGMA_A, SIGMA_G);
+    settle_static(&kf, 30);
+
+    float pE0, pN0, pE1, pN1;
+    KF_GetPosition(&kf, &pE0, &pN0);
+    int acc = KF_UpdateGated(&kf, 100.0f, 0.0f, 1.0f, 0.0f); /* teleport, Doppler=0 */
+    KF_GetPosition(&kf, &pE1, &pN1);
+    float moved = sqrtf((pE1 - pE0) * (pE1 - pE0) + (pN1 - pN0) * (pN1 - pN0));
+    printf("  [e] teleport: accepted=%d, position moved %.3f m\n", acc, moved);
+    CHECK(acc == 0, "e) 100 m teleport rejected");
+    CHECK(moved < 0.01f, "e) filter did not move on rejected update");
+
+    /* після викиду нормальні виміри знову приймаються за <= 3 fix-и */
+    int resumed = 0;
+    for (int k = 0; k < 3; k++) {
+        for (int i = 0; i < GPS_EVERY; i++) KF_Predict(&kf, DT, 0.0f, 0.0f);
+        if (KF_UpdateGated(&kf, 0.1f, -0.1f, 1.0f, 0.0f)) { resumed = 1; break; }
+    }
+    CHECK(resumed, "e) normal updates resume after the glitch");
+}
+
+/* test f: honest maneuver (2 m/s^2, consistent IMU + Doppler) is accepted */
+static void test_gate_maneuver(void) {
+    KalmanFilter kf;
+    KF_Init(&kf, SIGMA_A, SIGMA_G);
+    settle_static(&kf, 30);
+
+    int accepted = 0, total = 0;
+    double v = 0.0, p = 0.0;
+    for (int i = 0; i < 1000; i++) { /* 10 s розгону */
+        double a = 2.0 + ACC_NOISE * gauss();
+        KF_Predict(&kf, DT, (float)a, 0.0f); /* IMU бачить реальне прискорення */
+        p += v * DT + 0.5 * 2.0 * DT * DT;
+        v += 2.0 * DT;
+        if ((i + 1) % GPS_EVERY == 0) {
+            float zE = (float)(p + GPS_NOISE * gauss());
+            float zN = (float)(GPS_NOISE * gauss());
+            accepted += KF_UpdateGated(&kf, zE, zN, 1.0f, (float)v);
+            total++;
+        }
+    }
+    printf("  [f] maneuver: %d/%d updates accepted\n", accepted, total);
+    CHECK(accepted == total, "f) honest maneuver fully accepted");
+}
+
+/* test g: permanent 50 m shift - filter re-locks within KF_GATE_MAX_REJECTS fixes */
+static void test_gate_permanent_shift(void) {
+    KalmanFilter kf;
+    KF_Init(&kf, SIGMA_A, SIGMA_G);
+    settle_static(&kf, 30);
+
+    int first_accept = -1;
+    for (int k = 1; k <= 10; k++) {
+        for (int i = 0; i < GPS_EVERY; i++) KF_Predict(&kf, DT, 0.0f, 0.0f);
+        int acc = KF_UpdateGated(&kf, 50.0f + (float)(0.3 * gauss()),
+                                 (float)(0.3 * gauss()), 1.0f, 0.0f);
+        if (acc && first_accept < 0) first_accept = k;
+    }
+    float pE, pN;
+    KF_GetPosition(&kf, &pE, &pN);
+    printf("  [g] permanent shift: first accept at fix #%d, pos after 10 fixes = (%.2f, %.2f)\n",
+           first_accept, pE, pN);
+    CHECK(first_accept > 0 && first_accept <= KF_GATE_MAX_REJECTS,
+          "g) re-locks within KF_GATE_MAX_REJECTS fixes");
+    CHECK(fabsf(pE - 50.0f) < 5.0f, "g) position converges to the new location");
+}
+
 int main(void) {
     test_synthetic_motion();
     test_convergence();
     test_gps_outage();
     test_static_bias();
+    test_gate_teleport();
+    test_gate_maneuver();
+    test_gate_permanent_shift();
     printf(fails ? "\n%d TEST(S) FAILED\n" : "\nALL TESTS PASSED\n", fails);
     return fails ? 1 : 0;
 }

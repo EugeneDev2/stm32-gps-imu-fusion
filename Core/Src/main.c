@@ -23,6 +23,7 @@
 #include "accel.h"
 #include "gps.h"
 #include "geo.h"
+#include "kalman.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -56,6 +57,13 @@ UART_TxQueueTypeDef uart2_tx_queue = { .head = 0, .tail = 0, .is_transmitting = 
 static uint8_t geo_origin_set = 0;
 static uint8_t gps_fix = 0;
 static float geo_east = 0.0f, geo_north = 0.0f, gps_spd = 0.0f;
+
+/* Кальман: стартує разом з origin (перший fix = точка (0,0) ENU) */
+static KalmanFilter kf;
+static uint8_t kf_started = 0;
+static uint32_t kf_last_tick = 0;
+static uint32_t kf_last_fix_tick = 0;
+static uint8_t kf_gate = 1; /* результат останнього KF_UpdateGated (1=accepted) */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -206,7 +214,7 @@ int main(void)
      вивід заголовка отримає HAL_BUSY і рядок загубиться */
   uint32_t hdr_t0 = HAL_GetTick();
   while (!UART_TxQueue_IsEmpty(&uart2_tx_queue) && (HAL_GetTick() - hdr_t0) < 500) {}
-  const char csv_hdr[] = "t_ms,ax,ay,az,gx,gy,gz,fix,east,north,spd\r\n";
+  const char csv_hdr[] = "t_ms,ax,ay,az,gx,gy,gz,fix,east,north,spd,kf_east,kf_north,kf_vE,kf_vN,gate\r\n";
   HAL_UART_Transmit(&huart2, (uint8_t*)csv_hdr, sizeof(csv_hdr) - 1, 100);
   /* USER CODE END 2 */
 
@@ -215,6 +223,17 @@ int main(void)
   while (1)
   {
     if (ACCEL_Read()) {
+      /* Predict на кожному читанні IMU з реальним dt; орієнтації ще нема,
+         тому aE=aN=0 - фільтр веде тільки модель постійної швидкості */
+      if (kf_started) {
+        uint32_t now = HAL_GetTick();
+        float dt = (float)(now - kf_last_tick) / 1000.0f;
+        kf_last_tick = now;
+        if (dt > 0.0f && dt < 0.5f) {
+          KF_Predict(&kf, dt, 0.0f, 0.0f);
+        }
+      }
+
       GPS_RMCData rmc;
       if (GPS_GetRMC(&rmc)) {
         gps_fix = rmc.valid ? 1 : 0;
@@ -222,19 +241,36 @@ int main(void)
           if (!geo_origin_set) {
             GEO_SetOrigin(rmc.lat, rmc.lon);
             geo_origin_set = 1;
+            KF_Init(&kf, 0.3f, 1.5f); /* origin = (0,0) ENU = старт фільтра */
+            kf_started = 1;
+            kf_last_tick = HAL_GetTick();
+            kf_last_fix_tick = kf_last_tick;
             char msg[64];
             int mlen = snprintf(msg, sizeof(msg), "ORIGIN SET lat=%.5f lon=%.5f\r\n", rmc.lat, rmc.lon);
             HAL_UART_Transmit(&huart2, (uint8_t*)msg, (uint16_t)mlen, 100);
           }
           GEO_ToENU(rmc.lat, rmc.lon, &geo_east, &geo_north);
           gps_spd = rmc.speed_mps;
+          uint32_t fix_now = HAL_GetTick();
+          float dt_fix = (float)(fix_now - kf_last_fix_tick) / 1000.0f;
+          kf_last_fix_tick = fix_now;
+          kf_gate = (uint8_t)KF_UpdateGated(&kf, geo_east, geo_north, dt_fix, rmc.speed_mps);
         }
       }
 
-      char csv[128];
-      int len = snprintf(csv, sizeof(csv), "%lu,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%u,%.2f,%.2f,%.2f\r\n",
+      char csv[160];
+      int len = snprintf(csv, sizeof(csv), "%lu,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%u,%.2f,%.2f,%.2f",
                          HAL_GetTick(), accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z,
                          gps_fix, geo_east, geo_north, gps_spd);
+      if (kf_started) {
+        float pE, pN, vE, vN;
+        KF_GetPosition(&kf, &pE, &pN);
+        KF_GetVelocity(&kf, &vE, &vN);
+        len += snprintf(csv + len, sizeof(csv) - (size_t)len, ",%.3f,%.3f,%.3f,%.3f,%u\r\n",
+                        pE, pN, vE, vN, kf_gate);
+      } else {
+        len += snprintf(csv + len, sizeof(csv) - (size_t)len, ",,,,,\r\n"); /* фільтр ще не стартував */
+      }
       HAL_UART_Transmit(&huart2, (uint8_t*)csv, (uint16_t)len, 100);
     }
     HAL_Delay(100);

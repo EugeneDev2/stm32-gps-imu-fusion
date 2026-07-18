@@ -1,18 +1,22 @@
 /* replay_static.c - replay a recorded telemetry log through the Kalman filter.
  *
- * Usage: replay_static [input.csv] [output.csv]
- * Input rows: t_ms,ax,ay,az,gx,gy,gz,fix,east,north,spd (~10 Hz, GPS 1 Hz).
+ * Usage: replay_static [input.csv] [output.csv] [gate]
+ * Input rows: t_ms,ax,ay,az,gx,gy,gz,fix,east,north,spd[,...] (~10 Hz, GPS 1 Hz);
+ * extra columns (live-log kf fields) are ignored.
  * Predict runs with aE=aN=0 (no orientation yet); Update fires only when
- * (east, north) change, i.e. on real GPS fixes.
+ * (east, north) change, i.e. on real GPS fixes. With the "gate" argument
+ * updates go through KF_UpdateGated (Mahalanobis + Doppler cross-check).
  * Output: t_ms,raw_east,raw_north,kf_east,kf_north
  */
 #include "kalman.h"
 #include <ctype.h>
 #include <stdio.h>
+#include <string.h>
 
 int main(int argc, char **argv) {
     const char *in_path = (argc > 1) ? argv[1] : "logs/static_test.csv";
     const char *out_path = (argc > 2) ? argv[2] : "logs/static_test_kf.csv";
+    const int gated = (argc > 3) && (strcmp(argv[3], "gate") == 0);
 
     FILE *in = fopen(in_path, "r");
     if (!in) { fprintf(stderr, "cannot open %s\n", in_path); return 1; }
@@ -24,8 +28,8 @@ int main(int argc, char **argv) {
     KF_Init(&kf, 0.3f, 1.5f);
 
     char line[256];
-    int started = 0, rows = 0, fixes = 0;
-    double prev_t = 0.0, prev_e = 0.0, prev_n = 0.0;
+    int started = 0, rows = 0, fixes = 0, rejected = 0;
+    double prev_t = 0.0, prev_e = 0.0, prev_n = 0.0, prev_fix_t = 0.0;
 
     while (fgets(line, sizeof(line), in)) {
         double v[11];
@@ -39,13 +43,22 @@ int main(int argc, char **argv) {
             kf.x[0] = (float)e; /* стартуємо з першого відомого положення */
             kf.x[1] = (float)n;
             started = 1;
+            prev_fix_t = t;
         } else {
             double dt = (t - prev_t) / 1000.0;
             if (dt > 0.0 && dt < 1.0) {
                 KF_Predict(&kf, (float)dt, 0.0f, 0.0f);
             }
             if (e != prev_e || n != prev_n) {
-                KF_Update(&kf, (float)e, (float)n);
+                if (gated) {
+                    float dt_fix = (float)((t - prev_fix_t) / 1000.0);
+                    if (!KF_UpdateGated(&kf, (float)e, (float)n, dt_fix, (float)v[10])) {
+                        rejected++;
+                    }
+                } else {
+                    KF_Update(&kf, (float)e, (float)n);
+                }
+                prev_fix_t = t;
                 fixes++;
             }
         }
@@ -58,6 +71,11 @@ int main(int argc, char **argv) {
     }
     fclose(in);
     fclose(out);
-    printf("replayed %d rows, %d GPS fixes -> %s\n", rows, fixes, out_path);
+    if (gated) {
+        printf("replayed %d rows, %d GPS fixes (%d rejected by gate) -> %s\n",
+               rows, fixes, rejected, out_path);
+    } else {
+        printf("replayed %d rows, %d GPS fixes -> %s\n", rows, fixes, out_path);
+    }
     return 0;
 }
