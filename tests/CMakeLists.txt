@@ -16,16 +16,24 @@ set(REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 add_library(kalman ${REPO_ROOT}/Core/Src/kalman.c)
 target_include_directories(kalman PUBLIC ${REPO_ROOT}/Core/Inc)
 
+add_library(attitude ${REPO_ROOT}/Core/Src/attitude.c)
+target_include_directories(attitude PUBLIC ${REPO_ROOT}/Core/Inc)
+
 add_executable(test_kalman test_kalman.c)
 target_link_libraries(test_kalman kalman)
 
+add_executable(test_attitude test_attitude.c)
+target_link_libraries(test_attitude attitude kalman)
+
 add_executable(replay_static replay_static.c)
-target_link_libraries(replay_static kalman)
+target_link_libraries(replay_static kalman attitude)
 
 if(NOT MSVC)
     target_link_libraries(test_kalman m)
+    target_link_libraries(test_attitude m)
     target_link_libraries(replay_static m)
 endif()
 
 enable_testing()
 add_test(NAME kalman_unit COMMAND test_kalman)
+add_test(NAME attitude_unit COMMAND test_attitude)

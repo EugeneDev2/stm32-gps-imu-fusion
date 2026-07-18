@@ -52,6 +52,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/gps.c
     Core/Src/geo.c
     Core/Src/kalman.c
+    Core/Src/attitude.c
 )
 
 # Add include paths

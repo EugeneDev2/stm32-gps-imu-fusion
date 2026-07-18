@@ -5,7 +5,7 @@ Usage: python tools/plot_kf.py [logs/some_log.csv]
 
 Accepts these formats (auto-detected by column count):
   replay: t_ms,raw_east,raw_north,kf_east,kf_north
-  live  : t_ms,ax,ay,az,gx,gy,gz,fix,east,north,spd,kf_east,kf_north,kf_vE,kf_vN[,gate]
+  live  : t_ms,ax,ay,az,gx,gy,gz,fix,east,north,spd,kf_east,kf_north,kf_vE,kf_vN[,gate[,roll,pitch,yaw]]
           (kf fields are empty until the filter starts - such rows keep NaN;
            with the gate column, rejected fixes are marked on the plot)
 """
@@ -34,10 +34,10 @@ def load(path):
                 gate = float("nan")
                 if len(rec) == 5:              # replay format
                     t, re_, rn_, ke, kn = (parse_field(v) for v in rec)
-                elif len(rec) in (15, 16):     # live board format (16 = with gate)
+                elif len(rec) in (15, 16, 19): # live board (16 = +gate, 19 = +attitude)
                     t, re_, rn_ = float(rec[0]), float(rec[8]), float(rec[9])
                     ke, kn = parse_field(rec[11]), parse_field(rec[12])
-                    if len(rec) == 16:
+                    if len(rec) >= 16:
                         gate = parse_field(rec[15])
                 else:
                     continue

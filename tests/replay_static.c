@@ -1,13 +1,14 @@
 /* replay_static.c - replay a recorded telemetry log through the Kalman filter.
  *
- * Usage: replay_static [input.csv] [output.csv] [gate]
+ * Usage: replay_static [input.csv] [output.csv] [gate|att]
  * Input rows: t_ms,ax,ay,az,gx,gy,gz,fix,east,north,spd[,...] (~10 Hz, GPS 1 Hz);
  * extra columns (live-log kf fields) are ignored.
- * Predict runs with aE=aN=0 (no orientation yet); Update fires only when
- * (east, north) change, i.e. on real GPS fixes. With the "gate" argument
- * updates go through KF_UpdateGated (Mahalanobis + Doppler cross-check).
+ * Modes: default - plain KF_Update, predict with aE=aN=0;
+ *        gate    - KF_UpdateGated (Mahalanobis + Doppler cross-check);
+ *        att     - gate + attitude filter feeding real aE/aN into predict.
  * Output: t_ms,raw_east,raw_north,kf_east,kf_north
  */
+#include "attitude.h"
 #include "kalman.h"
 #include <ctype.h>
 #include <stdio.h>
@@ -16,7 +17,8 @@
 int main(int argc, char **argv) {
     const char *in_path = (argc > 1) ? argv[1] : "logs/static_test.csv";
     const char *out_path = (argc > 2) ? argv[2] : "logs/static_test_kf.csv";
-    const int gated = (argc > 3) && (strcmp(argv[3], "gate") == 0);
+    const int use_att = (argc > 3) && (strcmp(argv[3], "att") == 0);
+    const int gated = use_att || ((argc > 3) && (strcmp(argv[3], "gate") == 0));
 
     FILE *in = fopen(in_path, "r");
     if (!in) { fprintf(stderr, "cannot open %s\n", in_path); return 1; }
@@ -26,6 +28,8 @@ int main(int argc, char **argv) {
 
     KalmanFilter kf;
     KF_Init(&kf, 0.3f, 1.5f);
+    AttitudeFilter att;
+    ATT_Init(&att);
 
     char line[256];
     int started = 0, rows = 0, fixes = 0, rejected = 0;
@@ -47,7 +51,13 @@ int main(int argc, char **argv) {
         } else {
             double dt = (t - prev_t) / 1000.0;
             if (dt > 0.0 && dt < 1.0) {
-                KF_Predict(&kf, (float)dt, 0.0f, 0.0f);
+                float aE = 0.0f, aN = 0.0f;
+                if (use_att) {
+                    ATT_Update(&att, (float)v[1], (float)v[2], (float)v[3],
+                               (float)v[4], (float)v[5], (float)v[6], (float)dt);
+                    ATT_BodyToENU(&att, (float)v[1], (float)v[2], (float)v[3], &aE, &aN);
+                }
+                KF_Predict(&kf, (float)dt, aE, aN);
             }
             if (e != prev_e || n != prev_n) {
                 if (gated) {
